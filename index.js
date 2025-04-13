@@ -1,112 +1,94 @@
-require('dotenv').config();
+require('dotenv').config(); // Załaduj zmienne środowiskowe
 const express = require('express');
-const querystring = require('querystring');
-const axios = require('axios');
+const axios = require('axios'); // Biblioteka do wykonywania zapytań HTTP
 
 const app = express();
-const port = 3000;
 
-// Zmienne środowiskowe
-const client_id = process.env.SPOTIFY_CLIENT_ID;
-const client_secret = process.env.SPOTIFY_CLIENT_SECRET;
-const redirect_uri = 'http://127.0.0.1:3000/callback';
+let accessToken = '';  // Będzie przechowywać aktualny token
 
-let ACCESS_TOKEN = '';  // Będzie przechowywać aktualny token
-let REFRESH_TOKEN = '';  // Będzie przechowywać aktualny token odświeżający
-
-// Funkcja do generowania losowego ciągu znaków
-const generateRandomString = (length) => {
-  let text = '';
-  const possible = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
-  for (let i = 0; i < length; i++) {
-    text += possible.charAt(Math.floor(Math.random() * possible.length));
-  }
-  return text;
-};
-
-// Endpoint do logowania
-app.get('/login', (req, res) => {
-  const state = generateRandomString(16);
-  const scope = 'user-read-private user-read-email user-read-playback-state'; // Dodano user-read-playback-state
-
-  res.redirect('https://accounts.spotify.com/authorize?' +
-    querystring.stringify({
-      response_type: 'code',
-      client_id: client_id,
-      scope: scope,
-      redirect_uri: redirect_uri,
-      state: state
-    }));
-});
-
-
-// Endpoint callback do obsługi kodu autoryzacyjnego
-app.get('/callback', async (req, res) => {
-  const code = req.query.code || null;
-
-  if (!code) {
-    return res.status(400).send('Brak kodu autoryzacyjnego');
-  }
+// Funkcja do pobierania tokena dostępu z API Spotify
+async function getAccessToken() {
+  const tokenUrl = 'https://accounts.spotify.com/api/token';
+  const data = new URLSearchParams();
+  
+  // Dodaj dane do zapytania
+  data.append('grant_type', 'client_credentials');
+  data.append('client_id', process.env.SPOTIFY_CLIENT_ID ?? "");  // Pobierz client_id z .env
+  data.append('client_secret', process.env.SPOTIFY_CLIENT_SECRET ?? "");  // Pobierz client_secret z .env
 
   try {
-    // Wymiana kodu na token dostępu
-    const tokenResponse = await axios.post('https://accounts.spotify.com/api/token', querystring.stringify({
-      grant_type: 'authorization_code',
-      code: code,
-      redirect_uri: redirect_uri,
-      client_id: client_id,
-      client_secret: client_secret
-    }), {
+    const response = await axios.post(tokenUrl, data.toString(), {
       headers: {
         'Content-Type': 'application/x-www-form-urlencoded'
       }
     });
 
-    const { access_token, refresh_token } = tokenResponse.data;
-
-    // Zwróć tokeny lub użyj ich w aplikacji
-    ACCESS_TOKEN = access_token;
-    REFRESH_TOKEN = refresh_token;
-    res.json({
-      access_token,
-      refresh_token
-    });
+    // Zwróć token
+    return response.data.access_token;
   } catch (error) {
-    console.error('Błąd podczas wymiany kodu na token:', error.response?.data || error.message);
-    res.status(500).send('Wystąpił błąd podczas wymiany kodu na token');
+    console.error('Error fetching access token:', error);
+    throw error;
   }
-});
+}
 
-app.get('/nowplaying', async (req, res) => {
-
-  if (!ACCESS_TOKEN) {
-    return res.status(401).send('Brak tokenu dostępu');
-  }
+// Endpoint do pobrania obecnie odtwarzanej piosenki
+async function getCurrentlyPlayingSong() {
+  const url = 'https://api.spotify.com/v1/me/player/currently-playing';
 
   try {
-    const response = await axios.get('https://api.spotify.com/v1/me/player/currently-playing', {
+    // Zapytanie do Spotify API z nagłówkiem zawierającym token dostępu
+    const response = await axios.get(url, {
       headers: {
-        Authorization: `Bearer ${ACCESS_TOKEN}`
+        Authorization: `Bearer ${accessToken}` // Przekazanie tokena w nagłówku
       }
     });
 
+    // Jeśli jest odtwarzany utwór
     if (response.data && response.data.item) {
-      res.json({
+      return {
         title: response.data.item.name,
         artist: response.data.item.artists.map(a => a.name).join(', '),
         album: response.data.item.album.name,
-        imageUrl: response.data.item.album.images[0]?.url || null
-      });
+        imageUrl: response.data.item.album.images[0].url || null
+      };
     } else {
-      res.json({ message: 'Brak odtwarzanej piosenki' });
+      return { message: 'No track is currently playing.' };
     }
   } catch (error) {
-    console.error('Błąd podczas pobierania obecnie odtwarzanej piosenki:', error.message);
-    res.status(500).send('Wystąpił błąd podczas pobierania piosenki: '+error.message);
+    console.error('Error fetching currently playing song:', error);
+    return { error: 'Failed to fetch currently playing song: '+error.message };
+  }
+}
+
+// Endpoint Express do pobierania obecnie słuchanej piosenki
+app.get('/nowplaying', async (req, res) => {
+  try {
+    // Jeśli token nie jest dostępny, pobierz go
+    if (!accessToken) {
+      accessToken = await getAccessToken();
+    }
+
+    const song = await getCurrentlyPlayingSong();
+    res.json(song);
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to fetch currently playing song' });
   }
 });
 
-// Uruchomienie serwera
-app.listen(port,'0.0.0.0', () => {
-  console.log(`Aplikacja działa na http://localhost:${port}`);
-});
+// Funkcja uruchamiająca serwer
+async function startServer() {
+  try {
+    // Pobierz token dostępu przy starcie serwera
+    accessToken = await getAccessToken();
+    console.log('Access Token obtained:', accessToken);
+    
+    // Uruchom serwer
+    app.listen(3000, () => {
+      console.log('Server is running on port 3000');
+    });
+  } catch (error) {
+    console.error('Failed to get access token, server will not start:', error);
+  }
+}
+
+startServer();
